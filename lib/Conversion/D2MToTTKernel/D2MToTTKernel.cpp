@@ -1700,28 +1700,35 @@ public:
   static_assert(std::is_same_v<D2MCBOp, d2m::WaitOp> ||
                 std::is_same_v<D2MCBOp, d2m::ReserveOp>);
 
-  // Check if there's an explicit push/pop for this CB in the same block
+  // Check if there's an explicit push/pop for this CB in the enclosing block,
+  // including nested regions.
   static bool hasExplicitRelease(D2MCBOp op) {
     Block *block = op->getBlock();
     Value cb = op.getCb();
 
-    // Check for explicit d2m.push (for reserve) or d2m.pop (for wait)
-    for (Operation &blockOp : *block) {
+    bool found = false;
+    block->walk([&](Operation *blockOp) {
+      if (found) {
+        return WalkResult::interrupt();
+      }
       if constexpr (std::is_same_v<D2MCBOp, d2m::ReserveOp>) {
-        if (auto pushOp = dyn_cast<d2m::PushOp>(&blockOp)) {
+        if (auto pushOp = dyn_cast<d2m::PushOp>(blockOp)) {
           if (pushOp.getCb() == cb) {
-            return true;
+            found = true;
+            return WalkResult::interrupt();
           }
         }
       } else if constexpr (std::is_same_v<D2MCBOp, d2m::WaitOp>) {
-        if (auto popOp = dyn_cast<d2m::PopOp>(&blockOp)) {
+        if (auto popOp = dyn_cast<d2m::PopOp>(blockOp)) {
           if (popOp.getCb() == cb) {
-            return true;
+            found = true;
+            return WalkResult::interrupt();
           }
         }
       }
-    }
-    return false;
+      return WalkResult::advance();
+    });
+    return found;
   }
 
   LogicalResult
@@ -2354,7 +2361,7 @@ public:
     // d2m.get_cb ops, which are lowered by D2MGetCBRewriter.
     for (auto arg : blockArgs) {
       Type argType = getTypeConverter()->convertType(arg.getType());
-      if (mlir::isa<SemaphoreType>(argType)) {
+      if (mlir::isa<LocalSemaphoreType>(argType)) {
         if (getTTKernelThreadType(op) != ThreadType::Noc) {
           continue;
         }
@@ -2594,6 +2601,21 @@ public:
 };
 } // namespace
 
+namespace {
+class D2MPrintOpRewriter : public OpConversionPattern<d2m::PrintOp> {
+public:
+  using OpConversionPattern<d2m::PrintOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(d2m::PrintOp op, d2m::PrintOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<ttkernel::DPrintOp>(op, op.getFmt(),
+                                                    adaptor.getArgv());
+    return success();
+  }
+};
+} // namespace
+
 } // namespace mlir::tt::ttkernel
 
 namespace mlir::tt {
@@ -2702,6 +2724,9 @@ void populateD2MToTTKernelPatterns(
   patterns.add<ttkernel::D2MGetCBRewriter>(typeConverter, ctx);
   patterns.add<ttkernel::D2MDMAReadRewriter>(typeConverter, ctx, &cbProducerConsumer);
   patterns.add<ttkernel::D2MDMAWriteRewriter>(typeConverter, ctx, &cbProducerConsumer);
+
+  // Debug op patterns.
+  patterns.add<ttkernel::D2MPrintOpRewriter>(typeConverter, ctx);
 
   // This is needed to lower affine apply ops that may be generated when
   // `d2m.core_index` is used with a `phys_to_virt_map`.
