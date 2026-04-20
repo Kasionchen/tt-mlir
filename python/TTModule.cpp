@@ -203,7 +203,8 @@ void populateTTModule(nb::module_ &m) {
                 mlir::cast<tt::ttcore::TileSizeAttr>(
                     unwrap(supportedTileSizes)),
                 dstPhysicalSizeTiles, numCBs, numComputeThreads,
-                numDatamovementThreads));
+                numDatamovementThreads,
+                {1, static_cast<int64_t>(numDramChannels)}));
           })
       .def_prop_ro("usable_l1_size", &tt::ttcore::ChipDescAttr::getUsableL1Size)
       .def_prop_ro("usable_dram_channel_size",
@@ -442,6 +443,7 @@ void populateTTModule(nb::module_ &m) {
                         tt::ttcore::GridAttr::get(unwrap(ctx), gridShape,
                                                   unwrap(virtToPhysicalMap),
                                                   unwrap(physicalToVirtMap)),
+                        tt::ttcore::GridAttr::get(unwrap(ctx), {1, 1}),
                         unwrap(l1Map), unwrap(dramMap), meshShape, chipIds,
                         meshTopology));
                   })

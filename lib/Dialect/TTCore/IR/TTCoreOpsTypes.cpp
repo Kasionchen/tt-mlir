@@ -64,6 +64,7 @@ SystemDescAttr createDefaultBlackholeSystemDesc(
 
   // Populate dummy values for single chip or multi chip config.
   llvm::SmallVector<std::int64_t> gridShape = {10, 13};
+  llvm::SmallVector<std::int64_t> dramGridShape = {1, numDramChannels};
 
   // Physical-to-translated coordinate translation offsets
   llvm::SmallVector<std::int64_t> coordTranslationOffsets = {18, 18};
@@ -108,7 +109,7 @@ SystemDescAttr createDefaultBlackholeSystemDesc(
         l1UnreservedBase, eriscL1UnreservedBase, dramUnreservedBase,
         dramUnreservedEnd, supported_data_types, supported_tile_sizes,
         dstPhysicalSizeTiles, numCBs, numComputeThreads,
-        numDatamovementThreads));
+        numDatamovementThreads, dramGridShape));
   }
 
   // Duplicate number of chip capabilities based on number of chips.
@@ -178,6 +179,7 @@ createDefaultWormholeSystemDesc(mlir::MLIRContext *context,
 
   // Populate dummy values for single chip or multi chip config.
   llvm::SmallVector<std::int64_t> gridShape = {8, 8};
+  llvm::SmallVector<std::int64_t> dramGridShape = {1, numDramChannels};
 
   // Physical-to-translated coordinate translation offsets
   llvm::SmallVector<std::int64_t> coordTranslationOffsets = {18, 18};
@@ -222,7 +224,7 @@ createDefaultWormholeSystemDesc(mlir::MLIRContext *context,
         l1UnreservedBase, eriscL1UnreservedBase, dramUnreservedBase,
         dramUnreservedEnd, supportedDataTypes, supportedTileSizes,
         dstPhysicalSizeTiles, numCBs, numComputeThreads,
-        numDatamovementThreads));
+        numDatamovementThreads, dramGridShape));
   }
 
   // Duplicate number of chip capabilities based on number of chips.
@@ -434,6 +436,15 @@ mlir::FailureOr<SystemDescAttr> SystemDescAttr::getFromBuffer(
           TileSizeAttr::get(context, it->y(), it->x()));
     }
 
+    SmallVector<int64_t> dramGrid;
+    if (element->dram_grid_size()) {
+      dramGrid = {element->dram_grid_size()->y(),
+                  element->dram_grid_size()->x()};
+    } else {
+      // Fallback for old .ttsys files: assume Nx1 from numDramChannels
+      dramGrid = {1, static_cast<int64_t>(element->num_dram_channels())};
+    }
+
     auto currentChipDescAttr = ChipDescAttr::get(
         context, ArchAttr::get(context, arch),
         {element->grid_size()->y(), element->grid_size()->x()},
@@ -447,7 +458,7 @@ mlir::FailureOr<SystemDescAttr> SystemDescAttr::getFromBuffer(
         element->dram_unreserved_end(), supportedDataTypesAttr,
         supportedTileSizesAttr, element->dst_physical_size_tiles(),
         element->num_cbs(), element->num_compute_threads(),
-        element->num_datamovement_threads());
+        element->num_datamovement_threads(), dramGrid);
     chipDescList.push_back(currentChipDescAttr);
   }
 
@@ -1551,9 +1562,11 @@ DeviceAttr DeviceAttr::get(::mlir::MLIRContext *context,
   // Due mainly to SPMD programming model for multi-devices, workerGrid
   // currently is set to be limited to a single device {1, 1}.
   auto workerGrid = createWorkerGrid(context, chipGrid, {1, 1});
+  auto dramGrid =
+      GridAttr::get(context, SmallVector<int64_t>(chipDesc.getDramGrid()));
   auto l1Map = createL1Map(context, workerGrid);
   auto dramMap = createDramMap(context, workerGrid, systemDesc, chipIds);
-  return get(context, workerGrid, l1Map, dramMap, meshShape, chipIds,
+  return get(context, workerGrid, dramGrid, l1Map, dramMap, meshShape, chipIds,
              meshTopology);
 }
 
@@ -1652,8 +1665,9 @@ size_t DeviceAttr::getMemrefCBNumPages(MemRefType memrefType) const {
 
 ::mlir::LogicalResult DeviceAttr::verify(
     ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
-    GridAttr workerGrid, ::mlir::AffineMap l1Map, ::mlir::AffineMap dramMap,
-    ::llvm::ArrayRef<int64_t> meshShape, ::llvm::ArrayRef<unsigned> chipIds,
+    GridAttr workerGrid, GridAttr dramGrid, ::mlir::AffineMap l1Map,
+    ::mlir::AffineMap dramMap, ::llvm::ArrayRef<int64_t> meshShape,
+    ::llvm::ArrayRef<unsigned> chipIds,
     ::llvm::ArrayRef<Topology> meshTopology) {
   if (chipIds.empty()) {
     emitError() << "expected at least one chip";
