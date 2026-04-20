@@ -677,5 +677,13 @@ const std::set<mlir::StringRef>
     TTNNWorkarounds::TTNNWorkarounds::enabledOpsForWorkaroundWithOptimizer = {
         ttnn::WhereOp::getOperationName(), ttnn::FullOp::getOperationName(),
         ttnn::EmbeddingOp::getOperationName(),
-        ttnn::ScatterOp::getOperationName()};
+        ttnn::ScatterOp::getOperationName(),
+        // Experimental MoE CCL ops require explicit operand workarounds
+        // (RowMajor/UInt16 inputs, HeightSharded L1 outputs) to satisfy the
+        // tt-metal kernel layout requirements. Without workarounds, the
+        // optimizer may assign DRAM INTERLEAVED TILE layouts that trip the
+        // runtime sharded-tilize assert (tt-metal#30541).
+        ttnn::AllToAllDispatchMetadataOp::getOperationName(),
+        ttnn::MoeGptOp::getOperationName(),
+        ttnn::SelectiveReduceCombineOp::getOperationName()};
 } // namespace mlir::tt::ttnn

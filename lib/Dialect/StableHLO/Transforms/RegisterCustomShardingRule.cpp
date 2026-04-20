@@ -866,7 +866,10 @@ getAllToAllDispatchShardingRule(mlir::stablehlo::CustomCallOp op) {
 //   [0] input [B, 1, S, H]
 //   [1] indices [B, 1, S, K]
 //   [2] scores [B, 1, S, K]
-//   [3] mapping [1, 1, E, D]
+//   [3] mapping [1, 1, D_total, E]   (tt-metal fused decode layout —
+//                                     matches ttnn.all_to_all_dispatch_metadata
+//                                     which expects [D_total, E] after the
+//                                     TTIR→TTNN reshape)
 // Results:
 //   [0] dispatched [1, B*D, S, H]
 //   [1] metadata_indices [1, B*D, S, K]
@@ -917,8 +920,10 @@ getAllToAllDispatchMetadataShardingRule(mlir::stablehlo::CustomCallOp op) {
   int64_t sDim = inputType.getShape()[2];
   int64_t hDim = inputType.getShape()[3];
   int64_t kDim = indicesType.getShape()[3];
-  int64_t eDim = mappingType.getShape()[2];
-  int64_t dDim = mappingType.getShape()[3];
+  // D_total lives at mapping dim 2, E at mapping dim 3 under the tt-metal
+  // fused decode mapping convention. Both factors stay blocked-replicated.
+  int64_t dDim = mappingType.getShape()[2];
+  int64_t eDim = mappingType.getShape()[3];
 
   mlir::sdy::OpShardingRuleBuilder builder(op.getOperandTypes(),
                                            TypeRange(resultTypes),
@@ -943,12 +948,12 @@ getAllToAllDispatchMetadataShardingRule(mlir::stablehlo::CustomCallOp op) {
                     /*isBlocked=*/true);
   builder.addFactor(
       {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim, 2},
-      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim}, eDim,
+      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim}, dDim,
       mlir::sdy::FactorType::kNeedReplication,
       /*isBlocked=*/true);
   builder.addFactor(
       {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim, 3},
-      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim}, dDim,
+      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim}, eDim,
       mlir::sdy::FactorType::kNeedReplication,
       /*isBlocked=*/true);
 
@@ -1060,13 +1065,16 @@ getAllToAllCombineShardingRule(mlir::stablehlo::CustomCallOp op) {
 //   [0] hidden [1, B*D, S, H]
 //   [1] indices [1, B*D, S, K]
 //   [2] scores [1, B*D, S, K]
-//   [3] mapping [1, 1, E, D]
+//   [3] mapping [1, 1, D_total, E]   (tt-metal fused decode layout —
+//                                     matches gen_expert_mapping, see
+//                                     models/demos/gpt_oss/tt/
+//                                     experts_throughput/config.py)
 //   [4] gate_up_proj [E, H, 2I]
 //   [5] gate_up_bias [E, 2I]
 //   [6] down_proj [E, I, H]
 //   [7] down_proj_bias [E, H]
 // Results:
-//   [0] combine_metadata [1, 1, E, D]           (replicated metadata bundle)
+//   [0] combine_metadata [1, 1, D_total, E]     (mapping forwarded to combine)
 //   [1] bundled_indices [1, B*D, S, K]          (forwarded to combine)
 //   [2] bundled_scores [1, B*D, S, K]           (forwarded to combine)
 //   [3] auxiliary_scores [1, B*D, S, K]         (placeholder bundle slot)
@@ -1132,12 +1140,15 @@ getMoeGptShardingRule(mlir::stablehlo::CustomCallOp op) {
     return mlir::sdy::OpShardingRuleAttr();
   }
 
-  int64_t eDim = mappingType.getShape()[2];
+  // Expert count (E) lives at the last dim of the tt-metal-layout mapping;
+  // device count (D_total) is at dim 2. gate_up_proj.shape[0] matches E and
+  // is used here to cross-validate the layout.
+  int64_t eDim = mappingType.getShape()[3];
   int64_t bdDim = hiddenType.getShape()[1];
   int64_t sDim = hiddenType.getShape()[2];
   int64_t hiddenInputDim = hiddenType.getShape()[3];
   int64_t kDim = indicesType.getShape()[3];
-  int64_t dDim = mappingType.getShape()[3];
+  int64_t dDim = mappingType.getShape()[2];
   int64_t gateIntermediateDim = gateUpType.getShape()[2];
   int64_t intermediateDim = downType.getShape()[1];
   int64_t hiddenOutputDim = downType.getShape()[2];
@@ -1155,10 +1166,10 @@ getMoeGptShardingRule(mlir::stablehlo::CustomCallOp op) {
                     eDim, mlir::sdy::FactorType::kPassThrough);
 
   builder.addFactor({mlir::sdy::kNullDim, mlir::sdy::kNullDim,
-                     mlir::sdy::kNullDim, 2, mlir::sdy::kNullDim,
+                     mlir::sdy::kNullDim, 3, mlir::sdy::kNullDim,
                      mlir::sdy::kNullDim, mlir::sdy::kNullDim,
                      mlir::sdy::kNullDim},
-                    {2, mlir::sdy::kNullDim, mlir::sdy::kNullDim,
+                    {3, mlir::sdy::kNullDim, mlir::sdy::kNullDim,
                      mlir::sdy::kNullDim, mlir::sdy::kNullDim},
                     eDim, mlir::sdy::FactorType::kNeedReplication,
                     /*isBlocked=*/true);
@@ -1200,10 +1211,10 @@ getMoeGptShardingRule(mlir::stablehlo::CustomCallOp op) {
                     /*isBlocked=*/true);
 
   builder.addFactor({mlir::sdy::kNullDim, mlir::sdy::kNullDim,
-                     mlir::sdy::kNullDim, 3, mlir::sdy::kNullDim,
+                     mlir::sdy::kNullDim, 2, mlir::sdy::kNullDim,
                      mlir::sdy::kNullDim, mlir::sdy::kNullDim,
                      mlir::sdy::kNullDim},
-                    {3, mlir::sdy::kNullDim, mlir::sdy::kNullDim,
+                    {2, mlir::sdy::kNullDim, mlir::sdy::kNullDim,
                      mlir::sdy::kNullDim, mlir::sdy::kNullDim},
                     dDim, mlir::sdy::FactorType::kNeedReplication,
                     /*isBlocked=*/true);
@@ -1470,8 +1481,11 @@ getSelectiveReduceCombineShardingRule(mlir::stablehlo::CustomCallOp op) {
   int64_t sDim = expertOutType.getShape()[inputSDim];
   int64_t hDim = expertOutType.getShape()[3];
   int64_t kDim = metadataIndicesType.getShape()[3];
-  int64_t dDim = combineMetadataType.getShape()[3];
-  int64_t eTotalDim = combineMetadataType.getShape()[2];
+  // combine_metadata carries the forwarded [1, 1, D_total, E] mapping
+  // (tt-metal fused decode layout). See `getMoeGptShardingRule` for the
+  // matching result shape annotation.
+  int64_t dDim = combineMetadataType.getShape()[2];
+  int64_t eTotalDim = combineMetadataType.getShape()[3];
   int64_t bDim = resultType.getShape()[resultBDDim];
 
   mlir::sdy::OpShardingRuleBuilder builder(op);
@@ -1481,7 +1495,7 @@ getSelectiveReduceCombineShardingRule(mlir::stablehlo::CustomCallOp op) {
       {mlir::sdy::kNullDim}, eDim, mlir::sdy::FactorType::kPassThrough);
 
   builder.addFactor(
-      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim, 2},
+      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim, 3},
       {mlir::sdy::kNullDim}, eTotalDim, mlir::sdy::FactorType::kNeedReplication,
       /*isBlocked=*/true);
 
@@ -1507,13 +1521,12 @@ getSelectiveReduceCombineShardingRule(mlir::stablehlo::CustomCallOp op) {
                     mlir::sdy::FactorType::kNeedReplication,
                     /*isBlocked=*/true);
 
-  builder.addFactor(
-      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim,
-       mlir::sdy::kNullDim},
-      {resultBDDim}, bDim, mlir::sdy::FactorType::kPassThrough);
+  builder.addFactor({mlir::sdy::kNullDim, mlir::sdy::kNullDim,
+                     mlir::sdy::kNullDim, mlir::sdy::kNullDim},
+                    {resultBDDim}, bDim, mlir::sdy::FactorType::kPassThrough);
 
   builder.addFactor(
-      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim, 3},
+      {mlir::sdy::kNullDim, mlir::sdy::kNullDim, mlir::sdy::kNullDim, 2},
       {mlir::sdy::kNullDim}, dDim, mlir::sdy::FactorType::kNeedReplication,
       /*isBlocked=*/true);
 
